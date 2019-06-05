@@ -16,6 +16,9 @@ var HandlePanic = func(recovered interface{}, funcName string) {
 	ErrorLogger.Println(string(debug.Stack()))
 }
 
+// StopSignal will not be recovered, will propagate to upper level goroutine
+const StopSignal = "STOP!"
+
 // UnboundedExecutor is a executor without limits on counts of alive goroutines
 // it tracks the goroutine started by it, and can cancel them when shutdown
 type UnboundedExecutor struct {
@@ -59,9 +62,7 @@ func (executor *UnboundedExecutor) Go(handler func(ctx context.Context)) {
 	go func() {
 		defer func() {
 			recovered := recover()
-			// if you want to quit a goroutine without trigger HandlePanic
-			// use runtime.Goexit() to quit
-			if recovered != nil {
+			if recovered != nil && recovered != StopSignal {
 				if executor.HandlePanic == nil {
 					HandlePanic(recovered, funcName)
 				} else {
@@ -69,8 +70,8 @@ func (executor *UnboundedExecutor) Go(handler func(ctx context.Context)) {
 				}
 			}
 			executor.activeGoroutinesMutex.Lock()
+			defer executor.activeGoroutinesMutex.Unlock()
 			executor.activeGoroutines[startFrom] -= 1
-			executor.activeGoroutinesMutex.Unlock()
 		}()
 		handler(executor.ctx)
 	}()
@@ -92,24 +93,24 @@ func (executor *UnboundedExecutor) StopAndWaitForever() {
 func (executor *UnboundedExecutor) StopAndWait(ctx context.Context) {
 	executor.cancel()
 	for {
-		oneHundredMilliseconds := time.NewTimer(time.Millisecond * 100)
+		fiveSeconds := time.NewTimer(time.Millisecond * 100)
 		select {
-		case <-oneHundredMilliseconds.C:
-			if executor.checkNoActiveGoroutines() {
-				return
-			}
+		case <-fiveSeconds.C:
 		case <-ctx.Done():
+			return
+		}
+		if executor.checkGoroutines() {
 			return
 		}
 	}
 }
 
-func (executor *UnboundedExecutor) checkNoActiveGoroutines() bool {
+func (executor *UnboundedExecutor) checkGoroutines() bool {
 	executor.activeGoroutinesMutex.Lock()
 	defer executor.activeGoroutinesMutex.Unlock()
 	for startFrom, count := range executor.activeGoroutines {
 		if count > 0 {
-			InfoLogger.Println("UnboundedExecutor is still waiting goroutines to quit",
+			InfoLogger.Println("event!unbounded_executor.still waiting goroutines to quit",
 				"startFrom", startFrom,
 				"count", count)
 			return false

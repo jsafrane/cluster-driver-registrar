@@ -2,13 +2,12 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build aix darwin dragonfly freebsd linux netbsd openbsd solaris
+// +build darwin dragonfly freebsd linux netbsd openbsd solaris
 
 package unix
 
 import (
-	"bytes"
-	"sort"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -18,6 +17,13 @@ var (
 	Stdin  = 0
 	Stdout = 1
 	Stderr = 2
+)
+
+const (
+	darwin64Bit    = runtime.GOOS == "darwin" && sizeofPtr == 8
+	dragonfly64Bit = runtime.GOOS == "dragonfly" && sizeofPtr == 8
+	netbsd32Bit    = runtime.GOOS == "netbsd" && sizeofPtr == 4
+	solaris64Bit   = runtime.GOOS == "solaris" && sizeofPtr == 8
 )
 
 // Do the interface allocations only once for common
@@ -44,35 +50,14 @@ func errnoErr(e syscall.Errno) error {
 	return e
 }
 
-// ErrnoName returns the error name for error number e.
-func ErrnoName(e syscall.Errno) string {
-	i := sort.Search(len(errorList), func(i int) bool {
-		return errorList[i].num >= e
-	})
-	if i < len(errorList) && errorList[i].num == e {
-		return errorList[i].name
-	}
-	return ""
-}
-
-// SignalName returns the signal name for signal number s.
-func SignalName(s syscall.Signal) string {
-	i := sort.Search(len(signalList), func(i int) bool {
-		return signalList[i].num >= s
-	})
-	if i < len(signalList) && signalList[i].num == s {
-		return signalList[i].name
-	}
-	return ""
-}
-
 // clen returns the index of the first NULL byte in n or len(n) if n contains no NULL byte.
 func clen(n []byte) int {
-	i := bytes.IndexByte(n, 0)
-	if i == -1 {
-		i = len(n)
+	for i := 0; i < len(n); i++ {
+		if n[i] == 0 {
+			return i
+		}
 	}
-	return i
+	return len(n)
 }
 
 // Mmap manager, for use by operating system-specific implementations.
@@ -211,14 +196,7 @@ func Getpeername(fd int) (sa Sockaddr, err error) {
 	if err = getpeername(fd, &rsa, &len); err != nil {
 		return
 	}
-	return anyToSockaddr(fd, &rsa)
-}
-
-func GetsockoptByte(fd, level, opt int) (value byte, err error) {
-	var n byte
-	vallen := _Socklen(1)
-	err = getsockopt(fd, level, opt, unsafe.Pointer(&n), &vallen)
-	return n, err
+	return anyToSockaddr(&rsa)
 }
 
 func GetsockoptInt(fd, level, opt int) (value int, err error) {
@@ -228,54 +206,6 @@ func GetsockoptInt(fd, level, opt int) (value int, err error) {
 	return int(n), err
 }
 
-func GetsockoptInet4Addr(fd, level, opt int) (value [4]byte, err error) {
-	vallen := _Socklen(4)
-	err = getsockopt(fd, level, opt, unsafe.Pointer(&value[0]), &vallen)
-	return value, err
-}
-
-func GetsockoptIPMreq(fd, level, opt int) (*IPMreq, error) {
-	var value IPMreq
-	vallen := _Socklen(SizeofIPMreq)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
-func GetsockoptIPv6Mreq(fd, level, opt int) (*IPv6Mreq, error) {
-	var value IPv6Mreq
-	vallen := _Socklen(SizeofIPv6Mreq)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
-func GetsockoptIPv6MTUInfo(fd, level, opt int) (*IPv6MTUInfo, error) {
-	var value IPv6MTUInfo
-	vallen := _Socklen(SizeofIPv6MTUInfo)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
-func GetsockoptICMPv6Filter(fd, level, opt int) (*ICMPv6Filter, error) {
-	var value ICMPv6Filter
-	vallen := _Socklen(SizeofICMPv6Filter)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&value), &vallen)
-	return &value, err
-}
-
-func GetsockoptLinger(fd, level, opt int) (*Linger, error) {
-	var linger Linger
-	vallen := _Socklen(SizeofLinger)
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&linger), &vallen)
-	return &linger, err
-}
-
-func GetsockoptTimeval(fd, level, opt int) (*Timeval, error) {
-	var tv Timeval
-	vallen := _Socklen(unsafe.Sizeof(tv))
-	err := getsockopt(fd, level, opt, unsafe.Pointer(&tv), &vallen)
-	return &tv, err
-}
-
 func Recvfrom(fd int, p []byte, flags int) (n int, from Sockaddr, err error) {
 	var rsa RawSockaddrAny
 	var len _Socklen = SizeofSockaddrAny
@@ -283,7 +213,7 @@ func Recvfrom(fd int, p []byte, flags int) (n int, from Sockaddr, err error) {
 		return
 	}
 	if rsa.Addr.Family != AF_UNSPEC {
-		from, err = anyToSockaddr(fd, &rsa)
+		from, err = anyToSockaddr(&rsa)
 	}
 	return
 }
@@ -351,6 +281,13 @@ func Socketpair(domain, typ, proto int) (fd [2]int, err error) {
 	return
 }
 
+func Sendfile(outfd int, infd int, offset *int64, count int) (written int, err error) {
+	if raceenabled {
+		raceReleaseMerge(unsafe.Pointer(&ioSync))
+	}
+	return sendfile(outfd, infd, offset, count)
+}
+
 var ioSync int64
 
 func CloseOnExec(fd int) { fcntl(fd, F_SETFD, FD_CLOEXEC) }
@@ -367,13 +304,4 @@ func SetNonblock(fd int, nonblocking bool) (err error) {
 	}
 	_, err = fcntl(fd, F_SETFL, flag)
 	return err
-}
-
-// Exec calls execve(2), which replaces the calling executable in the process
-// tree. argv0 should be the full path to an executable ("/bin/ls") and the
-// executable name should also be the first argument in argv (["ls", "-l"]).
-// envv are the environment variables that should be passed to the new
-// process (["USER=go", "PWD=/tmp"]).
-func Exec(argv0 string, argv []string, envv []string) error {
-	return syscall.Exec(argv0, argv, envv)
 }
