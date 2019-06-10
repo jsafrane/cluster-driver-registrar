@@ -1,10 +1,10 @@
 FROM registry.svc.ci.openshift.org/ocp/builder:golang-1.11 AS builder
 WORKDIR /go/src/github.com/kubernetes-csi/cluster-driver-registrar
 COPY . .
-RUN go build ./cmd/cluster-driver-registrar
+RUN make
 
 FROM registry.svc.ci.openshift.org/ocp/4.0:base
-COPY --from=builder /go/src/github.com/kubernetes-csi/cluster-driver-registrar/cluster-driver-registrar /usr/bin/
+COPY --from=builder /go/src/github.com/kubernetes-csi/cluster-driver-registrar/bin/cluster-driver-registrar /usr/bin/
 RUN useradd cluster-driver-registrar
 USER cluster-driver-registrar
 ENTRYPOINT ["/usr/bin/cluster-driver-registrar"]
